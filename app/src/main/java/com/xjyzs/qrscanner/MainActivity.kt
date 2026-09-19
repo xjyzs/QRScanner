@@ -2,22 +2,32 @@ package com.xjyzs.qrscanner
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
-import android.hardware.camera2.*
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
-import android.net.Uri
-import android.os.*
+import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Process
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import android.widget.FrameLayout
+import androidx.core.net.toUri
 import com.king.wechat.qrcode.WeChatQRCodeDetector
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.opencv.OpenCV
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -38,8 +48,13 @@ class MainActivity : Activity() {
 
     private lateinit var textureView: TextureView
     private lateinit var rootLayout: FrameLayout
-    private val streamSize = Size(1280, 720)
+
+    private val streamSize = Size(1920, 1080)
     private var sensorOrientation = 90
+
+    private val cropWidth = 1280
+    private val cropHeight = 720
+    private val cropBytes = ByteArray(cropWidth * cropHeight)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,7 +64,7 @@ class MainActivity : Activity() {
             isEngineReady = true
         }
 
-        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
         sensorOrientation = try {
             cameraManager.getCameraCharacteristics("0")
                 .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
@@ -135,8 +150,6 @@ class MainActivity : Activity() {
         textureView.setTransform(matrix)
     }
 
-    private var cachedYBytes: ByteArray? = null
-
     private fun initImageReader(width: Int, height: Int) {
         imageReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2)
         imageReader.setOnImageAvailableListener({ reader ->
@@ -148,17 +161,20 @@ class MainActivity : Activity() {
 
             val plane = image.planes[0]
             val buffer = plane.buffer
-            val remaining = buffer.remaining()
-            if (cachedYBytes == null || cachedYBytes!!.size != remaining) {
-                cachedYBytes = ByteArray(remaining)
+            val rowStride = plane.rowStride
+            val xOffset = (image.width - cropWidth) / 2
+            val yOffset = (image.height - cropHeight) / 2
+            var dstPos = 0
+            for (row in 0 until cropHeight) {
+                buffer.position((yOffset + row) * rowStride + xOffset)
+                buffer.get(cropBytes, dstPos, cropWidth)
+                dstPos += cropWidth
             }
-            val bytes = cachedYBytes!!
-            buffer.get(bytes)
-            val yMat = Mat(image.height, image.width, CvType.CV_8UC1)
-            yMat.put(0, 0, bytes)
+            val cropMat = Mat(cropHeight, cropWidth, CvType.CV_8UC1)
+            cropMat.put(0, 0, cropBytes)
 
-            val results = WeChatQRCodeDetector.detectAndDecode(yMat)
-            yMat.release()
+            val results = WeChatQRCodeDetector.detectAndDecode(cropMat)
+            cropMat.release()
             image.close()
 
             if (results.isNotEmpty() && results[0].isNotEmpty()) {
@@ -220,7 +236,9 @@ class MainActivity : Activity() {
 
     private fun onScanSuccess(url: String) {
         runOnUiThread {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            val cm = this.getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText(null, url))
+            val intent = Intent(Intent.ACTION_VIEW, url.toUri()).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
             startActivity(intent)
